@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Gestor de Redes WiFi para Ubuntu Server en Chromebook
-Autor: [Tu Nombre]
+Autor: [Hugin Developments]
 """
 
 import subprocess
