@@ -1,22 +1,24 @@
 #!/usr/bin/env python3
 """
-Gestor de Redes WiFi para Ubuntu Server en Chromebook
-Autor: [Hugin Developments]
+Gestor de Redes WiFi para Ubuntu Server con Netplan
+Especial para Chromebook con Ubuntu Server
 """
 
 import subprocess
-import json
 import os
 import sys
 import time
+import yaml
+import shutil
 from pathlib import Path
 
-class WiFiManager:
+class NetplanWiFiManager:
     def __init__(self):
         self.interface = self.detect_wifi_interface()
-        self.config_dir = Path.home() / '.wifi_configs'
-        self.config_dir.mkdir(exist_ok=True)
-    
+        self.netplan_dir = Path('/etc/netplan')
+        self.backup_dir = Path('/etc/netplan/backups')
+        self.backup_dir.mkdir(exist_ok=True)
+        
     def run_command(self, command, sudo=False):
         """Ejecuta un comando en la terminal"""
         try:
@@ -33,229 +35,352 @@ class WiFiManager:
         try:
             result = subprocess.run(['ip', 'link', 'show'], capture_output=True, text=True)
             for line in result.stdout.split('\n'):
-                if 'wl' in line:  # Interfaces WiFi suelen empezar con wl
+                if 'wl' in line and 'BROADCAST' in line:
                     return line.split(':')[1].strip()
         except:
             pass
-        return 'wlan0'  # Valor por defecto
-    
-    def check_wifi_status(self):
-        """Verifica el estado del WiFi"""
-        print("🔍 Verificando estado del WiFi...")
         
-        # Verificar si la interfaz está activa
-        status = self.run_command(['ip', 'link', 'show', self.interface])
-        if status and 'state UP' in status:
+        # Si no detecta, probar interfaces comunes
+        for iface in ['wlan0', 'wlp1s0', 'wlp2s0']:
+            try:
+                subprocess.run(['ip', 'link', 'show', iface], capture_output=True, check=True)
+                return iface
+            except:
+                continue
+        
+        return 'wlan0'
+    
+    def backup_netplan_config(self):
+        """Crea un backup de la configuración actual de netplan"""
+        timestamp = time.strftime('%Y%m%d_%H%M%S')
+        for config_file in self.netplan_dir.glob('*.yaml'):
+            backup_file = self.backup_dir / f"{config_file.stem}_{timestamp}.yaml"
+            shutil.copy2(config_file, backup_file)
+            print(f"✅ Backup creado: {backup_file}")
+    
+    def get_current_netplan_config(self):
+        """Obtiene la configuración actual de netplan"""
+        config_files = list(self.netplan_dir.glob('*.yaml'))
+        if not config_files:
+            return None
+        
+        main_config = config_files[0]  # Usualmente 50-cloud-init.yaml o 01-netcfg.yaml
+        with open(main_config, 'r') as f:
+            return yaml.safe_load(f)
+    
+    def scan_wifi_networks(self):
+        """Escanea redes WiFi disponibles usando iwlist"""
+        print("📡 Escaneando redes WiFi...")
+        
+        # Activar interfaz temporalmente para escanear
+        self.run_command(['ip', 'link', 'set', self.interface, 'up'], sudo=True)
+        time.sleep(2)
+        
+        try:
+            # Escanear con iwlist
+            scan_result = self.run_command(['iwlist', self.interface, 'scan'], sudo=True)
+            networks = []
+            current_essid = None
+            
+            for line in scan_result.split('\n'):
+                line = line.strip()
+                if 'ESSID:' in line:
+                    essid = line.split('ESSID:')[1].strip().strip('"')
+                    if essid and essid not in ['', '\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00']:
+                        current_essid = essid
+                        networks.append({'essid': essid, 'encryption': 'Desconocido'})
+                elif 'Encryption key:' in line and current_essid:
+                    if 'on' in line:
+                        networks[-1]['encryption'] = 'Protegida'
+                    else:
+                        networks[-1]['encryption'] = 'Abierta'
+                elif 'IE: WPA' in line and current_essid:
+                    networks[-1]['encryption'] = 'WPA'
+                elif 'IE: IEEE 802.11i/WPA2' in line and current_essid:
+                    networks[-1]['encryption'] = 'WPA2'
+            
+            return networks
+            
+        except Exception as e:
+            print(f"❌ Error escaneando redes: {e}")
+            return []
+    
+    def create_netplan_config(self, ssid, password=None, dhcp=True, static_ip=None):
+        """Crea configuración netplan para WiFi"""
+        
+        # Configuración base
+        config = {
+            'network': {
+                'version': 2,
+                'renderer': 'networkd',
+                'wifis': {
+                    self.interface: {
+                        'access-points': {
+                            ssid: {} if not password else {'password': password}
+                        },
+                        'dhcp4': dhcp
+                    }
+                }
+            }
+        }
+        
+        # Configuración IP estática si se especifica
+        if static_ip and not dhcp:
+            config['network']['wifis'][self.interface]['dhcp4'] = False
+            config['network']['wifis'][self.interface]['addresses'] = [static_ip]
+            if 'gateway4' in static_ip:
+                config['network']['wifis'][self.interface]['gateway4'] = static_ip['gateway']
+            if 'nameservers' in static_ip:
+                config['network']['wifis'][self.interface]['nameservers'] = static_ip['nameservers']
+        
+        return config
+    
+    def connect_to_wifi(self, ssid, password=None, dhcp=True, static_ip=None):
+        """Conecta a una red WiFi usando netplan"""
+        print(f"🔗 Configurando conexión a '{ssid}'...")
+        
+        try:
+            # Crear backup
+            self.backup_netplan_config()
+            
+            # Obtener configuración actual
+            current_config = self.get_current_netplan_config()
+            if not current_config:
+                current_config = {'network': {'version': 2, 'renderer': 'networkd'}}
+            
+            # Agregar configuración WiFi
+            if 'wifis' not in current_config['network']:
+                current_config['network']['wifis'] = {}
+            
+            current_config['network']['wifis'][self.interface] = {
+                'access-points': {
+                    ssid: {} if not password else {'password': password}
+                },
+                'dhcp4': dhcp
+            }
+            
+            # Configuración estática si se especifica
+            if static_ip and not dhcp:
+                current_config['network']['wifis'][self.interface]['dhcp4'] = False
+                current_config['network']['wifis'][self.interface]['addresses'] = [static_ip['address']]
+                if 'gateway' in static_ip:
+                    current_config['network']['wifis'][self.interface]['gateway4'] = static_ip['gateway']
+                if 'dns' in static_ip:
+                    current_config['network']['wifis'][self.interface]['nameservers'] = {'addresses': static_ip['dns']}
+            
+            # Escribir nuevo archivo de configuración
+            config_file = self.netplan_dir / '99-wifi-config.yaml'
+            with open(config_file, 'w') as f:
+                yaml.dump(current_config, f, default_flow_style=False)
+            
+            print("✅ Configuración netplan guardada")
+            
+            # Aplicar configuración
+            return self.apply_netplan_config()
+            
+        except Exception as e:
+            print(f"❌ Error configurando WiFi: {e}")
+            return False
+    
+    def apply_netplan_config(self):
+        """Aplica la configuración de netplan"""
+        try:
+            print("🔄 Aplicando configuración netplan...")
+            
+            # Generar y aplicar configuración
+            result = self.run_command(['netplan', 'generate'], sudo=True)
+            if result is None:
+                return False
+            
+            result = self.run_command(['netplan', 'apply'], sudo=True)
+            if result is None:
+                return False
+            
+            print("⏳ Esperando que la conexión se establezca...")
+            time.sleep(10)
+            
+            # Verificar conexión
+            return self.check_connection()
+            
+        except Exception as e:
+            print(f"❌ Error aplicando netplan: {e}")
+            return False
+    
+    def check_connection(self):
+        """Verifica el estado de la conexión"""
+        print("🔍 Verificando conexión...")
+        
+        # Verificar interfaz
+        interface_status = self.run_command(['ip', 'addr', 'show', self.interface])
+        if not interface_status:
+            print(f"❌ Interfaz {self.interface} no encontrada")
+            return False
+        
+        if 'state UP' in interface_status:
             print(f"✅ Interfaz {self.interface} activa")
         else:
             print(f"❌ Interfaz {self.interface} inactiva")
             return False
         
-        # Verificar conexión a Internet
+        # Verificar IP
+        if 'inet ' in interface_status:
+            for line in interface_status.split('\n'):
+                if 'inet ' in line:
+                    ip = line.split()[1]
+                    print(f"📡 Dirección IP: {ip}")
+                    break
+        else:
+            print("❌ Sin dirección IP asignada")
+            return False
+        
+        # Verificar conectividad a Internet
         try:
-            subprocess.run(['ping', '-c', '1', '8.8.8.8'], 
+            print("🌐 Probando conectividad a Internet...")
+            subprocess.run(['ping', '-c', '3', '-W', '5', '8.8.8.8'], 
                          capture_output=True, check=True)
             print("✅ Conexión a Internet activa")
             return True
         except:
-            print("❌ Sin conexión a Internet")
-            return False
+            print("⚠️  Tiene IP pero sin conexión a Internet")
+            return True  # Considerar éxito si tiene IP
     
-    def scan_networks(self):
-        """Escanea redes WiFi disponibles"""
-        print("📡 Escaneando redes WiFi...")
-        
-        # Activar interfaz si no está activa
-        self.run_command(['ip', 'link', 'set', self.interface, 'up'], sudo=True)
-        time.sleep(2)
-        
-        # Escanear redes
-        scan_result = self.run_command(['iwlist', self.interface, 'scan'])
-        
-        networks = []
-        if scan_result:
-            current_essid = None
-            for line in scan_result.split('\n'):
-                line = line.strip()
-                if 'ESSID:' in line:
-                    essid = line.split('ESSID:')[1].strip().strip('"')
-                    if essid and essid != '\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00':
-                        current_essid = essid
-                        networks.append({'essid': essid, 'signal': 'N/A'})
-                elif 'Signal level=' in line and current_essid:
-                    signal = line.split('Signal level=')[1].split(' ')[0]
-                    networks[-1]['signal'] = signal
-        
-        return networks
-    
-    def connect_to_network(self, ssid, password=None):
-        """Conecta a una red WiFi"""
-        print(f"🔗 Conectando a {ssid}...")
-        
-        # Usar nmcli si está disponible (NetworkManager)
-        if self.run_command(['which', 'nmcli']):
-            return self.connect_with_nmcli(ssid, password)
-        else:
-            return self.connect_with_wpa_supplicant(ssid, password)
-    
-    def connect_with_nmcli(self, ssid, password):
-        """Conectar usando NetworkManager"""
-        if password:
-            cmd = ['nmcli', 'device', 'wifi', 'connect', ssid, 'password', password]
-        else:
-            cmd = ['nmcli', 'device', 'wifi', 'connect', ssid]
-        
-        result = self.run_command(cmd, sudo=True)
-        if result and 'successfully activated' in result:
-            print(f"✅ Conectado exitosamente a {ssid}")
-            return True
-        else:
-            print(f"❌ Error conectando a {ssid}")
-            return False
-    
-    def connect_with_wpa_supplicant(self, ssid, password):
-        """Conectar usando wpa_supplicant (método tradicional)"""
-        if not password:
-            print("❌ Se requiere contraseña para esta red")
-            return False
-        
-        # Crear configuración WPA
-        config_content = f"""
-network={{
-    ssid="{ssid}"
-    psk="{password}"
-}}
-"""
-        
-        config_file = self.config_dir / f'{ssid}.conf'
-        with open(config_file, 'w') as f:
-            f.write(config_content)
-        
-        # Detener procesos existentes
-        self.run_command(['pkill', 'wpa_supplicant'], sudo=True)
-        time.sleep(1)
-        
-        # Conectar
-        cmd = [
-            'wpa_supplicant', '-B', '-i', self.interface,
-            '-c', str(config_file)
-        ]
-        
-        result = self.run_command(cmd, sudo=True)
-        time.sleep(3)
-        
-        # Obtener IP via DHCP
-        self.run_command(['dhclient', self.interface], sudo=True)
-        
-        if self.check_wifi_status():
-            print(f"✅ Conectado exitosamente a {ssid}")
-            return True
-        else:
-            print(f"❌ Error conectando a {ssid}")
-            return False
-    
-    def save_network_config(self, ssid, password):
-        """Guarda la configuración de red de forma segura"""
-        config_file = self.config_dir / 'saved_networks.json'
-        
-        # Cargar configuraciones existentes
-        if config_file.exists():
-            with open(config_file, 'r') as f:
-                networks = json.load(f)
-        else:
-            networks = {}
-        
-        # Guardar nueva configuración
-        networks[ssid] = {
-            'password': password,
-            'saved_at': time.strftime('%Y-%m-%d %H:%M:%S')
-        }
-        
-        with open(config_file, 'w') as f:
-            json.dump(networks, f, indent=2)
-        
-        # Cambiar permisos para seguridad
-        os.chmod(config_file, 0o600)
-        print(f"✅ Configuración de {ssid} guardada")
-    
-    def list_saved_networks(self):
-        """Lista las redes guardadas"""
-        config_file = self.config_dir / 'saved_networks.json'
-        
-        if not config_file.exists():
-            print("📝 No hay redes guardadas")
-            return []
-        
-        with open(config_file, 'r') as f:
-            networks = json.load(f)
-        
-        print("📋 Redes guardadas:")
-        for ssid, info in networks.items():
-            print(f"  • {ssid} (guardada: {info['saved_at']})")
-        
-        return list(networks.keys())
-    
-    def disconnect(self):
-        """Desconecta de la red WiFi actual"""
+    def disconnect_wifi(self):
+        """Desconecta el WiFi eliminando configuración netplan"""
         print("🔌 Desconectando WiFi...")
         
-        if self.run_command(['which', 'nmcli']):
-            self.run_command(['nmcli', 'device', 'disconnect', self.interface], sudo=True)
-        else:
-            self.run_command(['pkill', 'wpa_supplicant'], sudo=True)
-            self.run_command(['ip', 'link', 'set', self.interface, 'down'], sudo=True)
+        try:
+            # Eliminar configuraciones WiFi personalizadas
+            for config_file in self.netplan_dir.glob('99-*.yaml'):
+                backup_file = self.backup_dir / f"disconnect_backup_{config_file.name}"
+                shutil.copy2(config_file, backup_file)
+                self.run_command(['rm', '-f', str(config_file)], sudo=True)
+                print(f"✅ Configuración eliminada: {config_file}")
+            
+            # Aplicar cambios
+            self.run_command(['netplan', 'apply'], sudo=True)
+            print("✅ WiFi desconectado")
+            
+        except Exception as e:
+            print(f"❌ Error desconectando WiFi: {e}")
+    
+    def list_saved_networks(self):
+        """Lista redes guardadas en netplan"""
+        print("📋 Redes configuradas en netplan:")
         
-        print("✅ WiFi desconectado")
+        config = self.get_current_netplan_config()
+        if not config or 'wifis' not in config['network']:
+            print("   No hay redes WiFi configuradas")
+            return
+        
+        for interface, settings in config['network']['wifis'].items():
+            if 'access-points' in settings:
+                for ssid in settings['access-points']:
+                    print(f"   • {ssid} (interface: {interface})")
+    
+    def get_interface_status(self):
+        """Obtiene estado detallado de la interfaz"""
+        print(f"📊 Estado de {self.interface}:")
+        
+        # Información de la interfaz
+        info = self.run_command(['ip', 'addr', 'show', self.interface])
+        if info:
+            for line in info.split('\n'):
+                if 'inet ' in line:
+                    print(f"   IP: {line.strip()}")
+                elif 'state ' in line:
+                    print(f"   Estado: {line.strip()}")
+        
+        # Conexión WiFi actual
+        wifi_info = self.run_command(['iwconfig', self.interface])
+        if wifi_info:
+            for line in wifi_info.split('\n'):
+                if 'ESSID:' in line:
+                    print(f"   Red: {line.strip()}")
+                elif 'Signal level=' in line:
+                    print(f"   Señal: {line.strip()}")
 
 def main():
-    manager = WiFiManager()
+    manager = NetplanWiFiManager()
+    
+    print(f"🌐 Gestor WiFi Netplan - Interfaz: {manager.interface}")
     
     while True:
         print("\n" + "="*50)
-        print("🌐 GESTOR DE REDES WiFi")
+        print("📡 GESTOR WiFi CON NETPLAN")
         print("="*50)
-        print("1. Verificar estado del WiFi")
-        print("2. Escanear redes disponibles")
-        print("3. Conectar a red WiFi")
-        print("4. Listar redes guardadas")
-        print("5. Desconectar WiFi")
-        print("6. Salir")
+        print("1. Escanear redes disponibles")
+        print("2. Conectar a red WiFi (DHCP)")
+        print("3. Conectar a red WiFi (IP estática)")
+        print("4. Ver estado de conexión")
+        print("5. Listar redes configuradas")
+        print("6. Desconectar WiFi")
+        print("7. Salir")
         print("-"*50)
         
-        choice = input("Selecciona una opción (1-6): ").strip()
+        choice = input("Selecciona una opción (1-7): ").strip()
         
         if choice == '1':
-            manager.check_wifi_status()
-        
-        elif choice == '2':
-            networks = manager.scan_networks()
+            networks = manager.scan_wifi_networks()
             if networks:
                 print("\n📶 Redes disponibles:")
                 for i, network in enumerate(networks, 1):
-                    print(f"  {i}. {network['essid']} (Señal: {network['signal']})")
+                    print(f"  {i}. {network['essid']} - {network['encryption']}")
             else:
                 print("❌ No se encontraron redes WiFi")
+        
+        elif choice == '2':
+            ssid = input("Nombre de la red (SSID): ").strip()
+            if not ssid:
+                print("❌ El SSID no puede estar vacío")
+                continue
+            
+            password = None
+            encryption = input("¿La red tiene contraseña? (s/n): ").strip().lower()
+            if encryption == 's':
+                password = input("Contraseña: ").strip()
+            
+            if manager.connect_to_wifi(ssid, password):
+                print(f"✅ Conectado exitosamente a {ssid}")
+            else:
+                print(f"❌ Error conectando a {ssid}")
         
         elif choice == '3':
             ssid = input("Nombre de la red (SSID): ").strip()
             if not ssid:
-                print("❌ El nombre de la red no puede estar vacío")
+                print("❌ El SSID no puede estar vacío")
                 continue
             
-            password = input("Contraseña (dejar vacío si es abierta): ").strip()
+            password = None
+            encryption = input("¿La red tiene contraseña? (s/n): ").strip().lower()
+            if encryption == 's':
+                password = input("Contraseña: ").strip()
             
-            if manager.connect_to_network(ssid, password):
-                save = input("¿Guardar esta configuración? (s/n): ").strip().lower()
-                if save == 's' and password:
-                    manager.save_network_config(ssid, password)
+            ip = input("Dirección IP estática (ej: 192.168.1.100/24): ").strip()
+            gateway = input("Gateway (ej: 192.168.1.1): ").strip()
+            dns = input("DNS (ej: 8.8.8.8,8.8.4.4): ").strip().split(',')
+            
+            static_config = {
+                'address': ip,
+                'gateway': gateway,
+                'dns': dns
+            }
+            
+            if manager.connect_to_wifi(ssid, password, dhcp=False, static_ip=static_config):
+                print(f"✅ Conectado exitosamente a {ssid} con IP estática")
+            else:
+                print(f"❌ Error conectando a {ssid}")
         
         elif choice == '4':
-            manager.list_saved_networks()
+            manager.get_interface_status()
+            manager.check_connection()
         
         elif choice == '5':
-            manager.disconnect()
+            manager.list_saved_networks()
         
         elif choice == '6':
+            manager.disconnect_wifi()
+        
+        elif choice == '7':
             print("👋 ¡Hasta luego!")
             break
         
@@ -265,10 +390,15 @@ def main():
         input("\nPresiona Enter para continuar...")
 
 if __name__ == "__main__":
-    # Verificar si se ejecuta como root
     if os.geteuid() != 0:
         print("🔒 Este script requiere permisos de superusuario")
-        print("Ejecuta: sudo python3 wifi_manager.py")
+        print("Ejecuta: sudo python3 netplan_wifi_manager.py")
+        sys.exit(1)
+    
+    # Verificar que netplan está disponible
+    if shutil.which('netplan') is None:
+        print("❌ Netplan no está instalado")
+        print("Instala con: sudo apt install netplan.io")
         sys.exit(1)
     
     main()
