@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Gestor de Redes WiFi para Ubuntu Server con Netplan
-Optimizado para hardware nativo
+Optimizado para hardware nativo (Standalone)
 """
 
 import subprocess
@@ -22,7 +22,7 @@ class NetplanWiFiManager:
         self.wifi_config_file = self.netplan_dir / '99-wifi-config.yaml'
         
     def run_command(self, command, sudo=False, show_errors=False):
-        """Ejecuta un comando en la terminal. Ahora permite mostrar errores críticos."""
+        """Ejecuta un comando en la terminal. Permite mostrar errores críticos."""
         try:
             if sudo:
                 command = ['sudo'] + command
@@ -72,16 +72,16 @@ class NetplanWiFiManager:
         # Sistema de reintentos (3 intentos)
         scan_result = None
         for intento in range(3):
-            time.sleep(3) # Dar tiempo al hardware para despertar y liberar recursos
+            time.sleep(3) # Dar tiempo al hardware para despertar
             scan_result = self.run_command(['iw', 'dev', self.interface, 'scan'], sudo=True)
             
             if scan_result:
-                break # Escaneo exitoso, salimos del bucle
+                break
             else:
                 print(f"⏳ El adaptador está inicializando... reintentando (Intento {intento + 1}/3)")
         
         if not scan_result:
-            print("❌ Error: La interfaz sigue ocupada o falló el escaneo. Intenta revisar si el modo avión (rfkill) está activado.")
+            print("❌ Error: La interfaz sigue ocupada. Intenta revisar si el modo avión (rfkill) está activado.")
             return []
 
         networks = {}
@@ -161,7 +161,6 @@ class NetplanWiFiManager:
         try:
             print("🔄 Generando y aplicando configuración netplan...")
             
-            # Ahora pasamos show_errors=True para que puedas ver por qué falla (Bug 3)
             result_gen = self.run_command(['netplan', 'generate'], sudo=True, show_errors=True)
             if result_gen is None:
                 print("❌ Error crítico en 'netplan generate'.")
@@ -293,20 +292,28 @@ def main():
                     print(f"  {i}. {network['essid']} - {network['encryption']}{señal}")
         
         elif choice == '2':
-            # Bug 2 resuelto: Opción de escape en el input
             ssid = input("Nombre de la red (SSID) [Dejar blanco para cancelar]: ").strip()
             if not ssid:
                 print("🚫 Operación cancelada.")
                 continue
             
             password = None
-            encryption = input("¿La red tiene contraseña? (s/n) [Dejar blanco para cancelar]: ").strip().lower()
+            while True:
+                encryption = input("¿La red tiene contraseña? (s/n) [Dejar blanco para cancelar]: ").strip().lower()
+                if not encryption:
+                    break
+                
+                if encryption == 's':
+                    password = input("Contraseña: ").strip()
+                    break
+                elif encryption == 'n':
+                    break
+                else:
+                    print("❌ Por favor, ingresa solo 's' para Sí, o 'n' para No.")
+            
             if not encryption:
                 print("🚫 Operación cancelada.")
                 continue
-                
-            if encryption == 's':
-                password = input("Contraseña: ").strip()
             
             if manager.connect_to_wifi(ssid, password):
                 print(f"✅ Proceso de conexión a {ssid} finalizado.")
@@ -320,12 +327,26 @@ def main():
                 continue
             
             password = None
-            encryption = input("¿La red tiene contraseña? (s/n): ").strip().lower()
-            if encryption == 's':
-                password = input("Contraseña: ").strip()
+            while True:
+                encryption = input("¿La red tiene contraseña? (s/n) [Dejar blanco para cancelar]: ").strip().lower()
+                if not encryption:
+                    break
+                
+                if encryption == 's':
+                    password = input("Contraseña: ").strip()
+                    break
+                elif encryption == 'n':
+                    break
+                else:
+                    print("❌ Por favor, ingresa solo 's' para Sí, o 'n' para No.")
+            
+            if not encryption:
+                print("🚫 Operación cancelada.")
+                continue
             
             ip = input("Dirección IP estática (ej: 192.168.1.100/24) [Blanco para cancelar]: ").strip()
             if not ip:
+                print("🚫 Operación cancelada.")
                 continue
                 
             try:
@@ -339,7 +360,10 @@ def main():
             dns = [d.strip() for d in dns_input.split(',')] if dns_input else []
             
             static_config = {'address': ip, 'gateway': gateway, 'dns': dns}
-            manager.connect_to_wifi(ssid, password, dhcp=False, static_ip=static_config)
+            if manager.connect_to_wifi(ssid, password, dhcp=False, static_ip=static_config):
+                print(f"✅ Proceso estático a {ssid} finalizado.")
+            else:
+                print(f"❌ Error conectando a {ssid}")
         
         elif choice == '4':
             manager.get_interface_status()
@@ -359,14 +383,19 @@ def main():
         else:
             print("❌ Opción no válida")
         
-        input("\nPresiona Enter para continuar...")
+        # --- MEJORA: Bucle estricto para Enter ---
+        while True:
+            tecla = input("\nPresiona Enter para continuar...")
+            if tecla == "":
+                break
+            else:
+                print("⚠️  Entrada no válida. Por favor, no escribas nada, solo presiona la tecla Enter.")
 
 if __name__ == "__main__":
     if os.geteuid() != 0:
         print("🔒 Este script requiere permisos de superusuario (sudo).")
         sys.exit(1)
     
-    # Añadida verificación de wpasupplicant (vital para redes con contraseña)
     tools = ['netplan', 'iw', 'ip', 'wpa_supplicant']
     missing_tools = [tool for tool in tools if shutil.which(tool) is None]
     
