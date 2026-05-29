@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Gestor de Redes WiFi y Hotspot para Ubuntu Server
-Optimizado con flujos de trabajo continuos y submenús (v1.6)
+Optimizado con flujos de trabajo continuos, submenús y NAT (v1.7)
 """
 
 import subprocess
@@ -298,7 +298,7 @@ class NetplanWiFiManager:
             print("🚫 Operación de Hotspot cancelada.")
             return
 
-        print(f"\n🔥 Iniciando Punto de Acceso en {self.ap_interface}...")
+        print(f"\n🔥 Iniciando Punto de Acceso en {self.ap_interface} y configurando NAT...")
 
         if self.ap_interface == self.client_interface:
             print("⚠️  Desvinculando cliente de internet para liberar hardware...")
@@ -307,6 +307,16 @@ class NetplanWiFiManager:
         self.stop_hotspot(silent=True)
 
         try:
+            # 1. Liberar puerto 53
+            print("⚙️  Liberando puerto DNS...")
+            self.run_command(['systemctl', 'stop', 'systemd-resolved'], sudo=True)
+
+            # 2. Configurar NAT y Enrutamiento
+            print("⚙️  Activando enrutamiento de internet (IP Forwarding)...")
+            self.run_command(['sysctl', '-w', 'net.ipv4.ip_forward=1'], sudo=True)
+            self.run_command(['iptables', '-t', 'nat', '-F'], sudo=True)
+            self.run_command(['iptables', '-t', 'nat', '-A', 'POSTROUTING', '-o', self.client_interface, '-j', 'MASQUERADE'], sudo=True)
+
             hostapd_conf = "/etc/ap_hostapd.conf"
             with open(hostapd_conf, 'w') as f:
                 f.write(f"interface={self.ap_interface}\n")
@@ -324,6 +334,8 @@ class NetplanWiFiManager:
                 f.write(f"interface={self.ap_interface}\n")
                 f.write("bind-dynamic\n")
                 f.write("dhcp-range=192.168.4.10,192.168.4.50,255.255.255.0,12h\n")
+                f.write("dhcp-option=3,192.168.4.1\n")
+                f.write("dhcp-option=6,8.8.8.8,8.8.4.4\n")
 
             print("⚙️  Configurando enrutamiento de red local...")
             self.run_command(['ip', 'link', 'set', self.ap_interface, 'down'], sudo=True)
@@ -341,7 +353,8 @@ class NetplanWiFiManager:
             print(f"📱 Conéctate desde tu teléfono o laptop:")
             print(f"   Red (SSID): {self.ap_ssid}")
             print(f"   Contraseña: {self.ap_password}")
-            print(f"   Comando SSH: ssh usuario@192.168.4.1\n")
+            print(f"   Comando SSH: ssh usuario@192.168.4.1")
+            print(f"   Internet: Compartido desde {self.client_interface}\n")
 
         except Exception as e:
             print(f"❌ Error iniciando Hotspot: {e}")
@@ -351,8 +364,11 @@ class NetplanWiFiManager:
             print("⚠️  No hay un Hotspot activo para detener.")
             return
 
-        if not silent: print(f"🔌 Deteniendo Punto de Acceso en {self.ap_interface}...")
+        if not silent: print(f"🔌 Deteniendo Punto de Acceso y limpiando reglas de red...")
             
+        # Limpiar reglas de NAT
+        self.run_command(['iptables', '-t', 'nat', '-F'], sudo=True)
+        
         self.run_command(['pkill', '-f', 'hostapd -B /etc/ap_hostapd.conf'], sudo=True)
         self.run_command(['pkill', '-f', 'dnsmasq -C /etc/ap_dnsmasq.conf'], sudo=True)
         
@@ -360,7 +376,7 @@ class NetplanWiFiManager:
             self.run_command(['ip', 'addr', 'flush', 'dev', self.ap_interface], sudo=True)
             self.run_command(['ip', 'link', 'set', self.ap_interface, 'down'], sudo=True)
             
-        if not silent: print("✅ Hotspot detenido y adaptador apagado.")
+        if not silent: print("✅ Hotspot detenido, adaptador apagado y enrutamiento restablecido.")
 
 def settings_menu(manager):
     while True:
