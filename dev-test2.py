@@ -449,7 +449,7 @@ def main():
         print("4. Encender WiFi Cliente")
         print("5. Apagar WiFi Cliente")
         print("-" * 60)
-        print("6. ⚙️  Configuraciones")
+        print("6. ⚙️ Configuraciones")
         print("7. 🟢 Iniciar AP (Modo Mantenimiento)")
         print("8. 🔴 Detener AP (Restaurar Internet)")
         print("-" * 60)
