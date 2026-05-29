@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Gestor de Redes WiFi y Hotspot para Ubuntu Server
-Optimizado con flujos de trabajo continuos, submenús y NAT (v1.7)
+Optimizado con Gestor de Ciclo de Vida (Cliente <-> AP) y NAT (v1.8)
 """
 
 import subprocess
@@ -77,7 +77,7 @@ class NetplanWiFiManager:
             else: print(f"⏳ Inicializando hardware... (Intento {intento + 1}/3)")
         
         if not scan_result:
-            print("❌ Error: La interfaz sigue ocupada.")
+            print("❌ Error: La interfaz sigue ocupada. Asegúrate de detener el AP primero.")
             return []
 
         networks, seen_ssids, unique_networks = {}, set(), []
@@ -154,7 +154,6 @@ class NetplanWiFiManager:
             return False
     
     def get_interface_status(self):
-        """Obtiene y muestra el estado detallado de la interfaz cliente"""
         print(f"\n📊 Estado de la interfaz: {self.client_interface}")
         link_info = self.run_command(['iw', 'dev', self.client_interface, 'link'])
         if link_info and "Not connected" not in link_info:
@@ -206,9 +205,6 @@ class NetplanWiFiManager:
         except Exception as e:
             print(f"❌ Error apagando WiFi: {e}")
 
-    # ==========================================
-    # LÓGICA DINÁMICA (CLIENTE Y HOTSPOT)
-    # ==========================================
     def change_client_interface(self):
         all_ifaces = self.get_all_wireless_interfaces()
         if not all_ifaces:
@@ -298,7 +294,7 @@ class NetplanWiFiManager:
             print("🚫 Operación de Hotspot cancelada.")
             return
 
-        print(f"\n🔥 Iniciando Punto de Acceso en {self.ap_interface} y configurando NAT...")
+        print(f"\n🔥 Iniciando Punto de Acceso en {self.ap_interface}...")
 
         if self.ap_interface == self.client_interface:
             print("⚠️  Desvinculando cliente de internet para liberar hardware...")
@@ -307,9 +303,11 @@ class NetplanWiFiManager:
         self.stop_hotspot(silent=True)
 
         try:
-            # 1. Liberar puerto 53
-            print("⚙️  Liberando puerto DNS...")
+            # 1. Dormir servicios conflictivos (La Clave para que dnsmasq y hostapd funcionen)
+            print("⚙️  Durmiendo servicios nativos de cliente (DNS y WPA)...")
             self.run_command(['systemctl', 'stop', 'systemd-resolved'], sudo=True)
+            self.run_command(['systemctl', 'stop', 'wpa_supplicant'], sudo=True)
+            self.run_command(['pkill', 'wpa_supplicant'], sudo=True)
 
             # 2. Configurar NAT y Enrutamiento
             print("⚙️  Activando enrutamiento de internet (IP Forwarding)...")
@@ -337,7 +335,7 @@ class NetplanWiFiManager:
                 f.write("dhcp-option=3,192.168.4.1\n")
                 f.write("dhcp-option=6,8.8.8.8,8.8.4.4\n")
 
-            print("⚙️  Configurando enrutamiento de red local...")
+            print("⚙️  Configurando IPs locales...")
             self.run_command(['ip', 'link', 'set', self.ap_interface, 'down'], sudo=True)
             self.run_command(['ip', 'addr', 'flush', 'dev', self.ap_interface], sudo=True)
             self.run_command(['ip', 'addr', 'add', '192.168.4.1/24', 'dev', self.ap_interface], sudo=True)
@@ -364,19 +362,33 @@ class NetplanWiFiManager:
             print("⚠️  No hay un Hotspot activo para detener.")
             return
 
-        if not silent: print(f"🔌 Deteniendo Punto de Acceso y limpiando reglas de red...")
+        if not silent: print(f"🔌 Deteniendo Punto de Acceso y restaurando servicios...")
             
-        # Limpiar reglas de NAT
+        # 1. Limpiar reglas de NAT
         self.run_command(['iptables', '-t', 'nat', '-F'], sudo=True)
         
+        # 2. Matar procesos del servidor AP
         self.run_command(['pkill', '-f', 'hostapd -B /etc/ap_hostapd.conf'], sudo=True)
         self.run_command(['pkill', '-f', 'dnsmasq -C /etc/ap_dnsmasq.conf'], sudo=True)
         
+        # 3. Limpiar y reiniciar la interfaz física
         if self.ap_interface:
             self.run_command(['ip', 'addr', 'flush', 'dev', self.ap_interface], sudo=True)
             self.run_command(['ip', 'link', 'set', self.ap_interface, 'down'], sudo=True)
+            self.run_command(['ip', 'link', 'set', self.ap_interface, 'up'], sudo=True)
+        
+        # 4. Revivir servicios nativos de Ubuntu (El reverso)
+        print("⚙️  Reviviendo systemd-resolved y wpa_supplicant...")
+        self.run_command(['systemctl', 'start', 'systemd-resolved'], sudo=True)
+        self.run_command(['systemctl', 'restart', 'wpa_supplicant'], sudo=True)
+        
+        # 5. Reconectar a internet usando la última config de Netplan
+        if not silent: 
+            print("🔄 Reconectando a Internet (Netplan)...")
+            self.run_command(['netplan', 'apply'], sudo=True)
             
-        if not silent: print("✅ Hotspot detenido, adaptador apagado y enrutamiento restablecido.")
+        self.ap_interface = None
+        if not silent: print("✅ Hotspot detenido. Modo Cliente restaurado.")
 
 def settings_menu(manager):
     while True:
