@@ -57,19 +57,22 @@ def start_ap(debug=False):
         if debug:
             f.write("log-dhcp\nlog-queries\n") # Activa logs detallados para el modo debug
 
-    # 4. Configurar red
-    print("   [4/5] Levantando interfaz de red...")
-    run(f"ip link set {AP_INTERFACE} down")
+    # 4. Lanzar hostapd PRIMERO
+    print("   [4/5] Iniciando hostapd (Emisor WiFi)...")
+    if debug:
+        subprocess.Popen(['hostapd', '-B', '/etc/ap_hostapd.conf'])
+    else:
+        subprocess.Popen(['hostapd', '-B', '/etc/ap_hostapd.conf'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    
+    time.sleep(3) # Damos 3 segundos para que hostapd se asiente
+
+    # 5. Configurar red y Lanzar dnsmasq DESPUÉS
+    print("   [5/5] Asignando IP y levantando dnsmasq...")
     run(f"ip addr flush dev {AP_INTERFACE}")
     run(f"ip addr add 192.168.4.1/24 dev {AP_INTERFACE}")
     run(f"ip link set {AP_INTERFACE} up")
-    run("rfkill unblock wifi")
-
-    # 5. Lanzar demonios
-    print("   [5/5] Iniciando hostapd y dnsmasq...")
+    
     if debug:
-        subprocess.Popen(['hostapd', '-B', '/etc/ap_hostapd.conf'])
-        time.sleep(2)
         subprocess.Popen(['dnsmasq', '-C', '/etc/ap_dnsmasq.conf'])
         
         print("\n" + "="*50)
@@ -77,14 +80,10 @@ def start_ap(debug=False):
         print("Presiona Ctrl+C para salir de los logs")
         print("="*50 + "\n")
         try:
-            # Mostramos los logs en vivo
             os.system("tail -n 0 -f /var/log/syslog | grep --line-buffered -E 'hostapd|dnsmasq'")
         except KeyboardInterrupt:
             print("\n\n⏸️  Logs interrumpidos por el usuario.")
-            print("⚠️  NOTA: El AP sigue encendido en segundo plano.")
     else:
-        subprocess.Popen(['hostapd', '-B', '/etc/ap_hostapd.conf'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        time.sleep(2)
         subprocess.Popen(['dnsmasq', '-C', '/etc/ap_dnsmasq.conf'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         print("\n✅ HOTSPOT ACTIVADO.")
 
