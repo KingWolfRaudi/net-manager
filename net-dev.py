@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Gestor de Redes WiFi y Hotspot para Ubuntu Server
-Optimizado con selección dinámica de interfaces y AP configurable
+Optimizado con selección dinámica total (Cliente y AP)
 """
 
 import subprocess
@@ -20,13 +20,11 @@ class NetplanWiFiManager:
         self.backup_dir.mkdir(exist_ok=True)
         self.wifi_config_file = self.netplan_dir / '99-wifi-config.yaml'
         
-        # Credenciales del AP por defecto
         self.ap_ssid = "Servidor_Mantenimiento"
         self.ap_password = "acceso_local_123"
         
-        # Estado de interfaces
         self.client_interface = self.get_internal_interface()
-        self.ap_interface = None # Se define dinámicamente al iniciar el AP
+        self.ap_interface = None 
         
     def run_command(self, command, sudo=False, show_errors=False):
         try:
@@ -42,7 +40,6 @@ class NetplanWiFiManager:
             return None
 
     def get_all_wireless_interfaces(self):
-        """Obtiene todas las interfaces inalámbricas del sistema"""
         interfaces = []
         try:
             result = subprocess.run(['ip', '-br', 'link', 'show'], capture_output=True, text=True)
@@ -51,17 +48,16 @@ class NetplanWiFiManager:
                     parts = line.split()
                     if parts:
                         iface = parts[0]
-                        if iface.startswith('wl'): # Atrapa wlan, wlp, wlx
+                        if iface.startswith('wl'): 
                             interfaces.append(iface)
         except:
             pass
         return interfaces
         
     def get_internal_interface(self):
-        """Identifica la tarjeta interna de la Chromebook (wlp o wlan)"""
         all_ifaces = self.get_all_wireless_interfaces()
         internals = [i for i in all_ifaces if not i.startswith('wlx')]
-        return internals[0] if internals else 'wlp1s0'
+        return internals[0] if internals else (all_ifaces[0] if all_ifaces else 'wlan0')
     
     def backup_netplan_config(self):
         if self.wifi_config_file.exists():
@@ -167,7 +163,7 @@ class NetplanWiFiManager:
                     has_ip = True
                     break
         if not has_ip:
-            print("❌ Sin IP asignada. Revisa la contraseña o el router.")
+            print("❌ Sin IP asignada en el cliente. Revisa router o DHCP.")
             return False
         try:
             subprocess.run(['ping', '-c', '3', '-W', '5', '8.8.8.8'], capture_output=True, check=True)
@@ -178,7 +174,7 @@ class NetplanWiFiManager:
             return True 
     
     def disconnect_wifi(self):
-        print("🔌 Apagando adaptador cliente WiFi...")
+        print(f"🔌 Apagando adaptador cliente ({self.client_interface})...")
         try:
             if self.wifi_config_file.exists():
                 self.backup_netplan_config()
@@ -186,15 +182,40 @@ class NetplanWiFiManager:
                 self.run_command(['netplan', 'apply'], sudo=True)
             
             if self.run_command(['ip', 'link', 'set', self.client_interface, 'down'], sudo=True) is not None:
-                print(f"✅ Interfaz cliente '{self.client_interface}' apagada.")
+                print(f"✅ Interfaz apagada.")
         except Exception as e:
             print(f"❌ Error apagando WiFi: {e}")
 
     # ==========================================
-    # LÓGICA DINÁMICA DEL MODO MANTENIMIENTO
+    # LÓGICA DINÁMICA (CLIENTE Y HOTSPOT)
     # ==========================================
+    def change_client_interface(self):
+        all_ifaces = self.get_all_wireless_interfaces()
+        if not all_ifaces:
+            print("❌ No hay adaptadores de red detectados.")
+            return
+            
+        print("\n📡 Selecciona el adaptador para RECIBIR Internet (Cliente WiFi):")
+        for idx, iface in enumerate(all_ifaces, 1):
+            tipo = "USB/Externo" if iface.startswith('wlx') else "Interno/PCI"
+            actual = " [ACTUAL]" if iface == self.client_interface else ""
+            print(f"  {idx}. {iface} ({tipo}){actual}")
+            
+        while True:
+            try:
+                choice = input("Ingresa el número [Blanco para cancelar]: ").strip()
+                if not choice: return
+                
+                choice = int(choice)
+                if 1 <= choice <= len(all_ifaces):
+                    self.client_interface = all_ifaces[choice-1]
+                    print(f"✅ Adaptador cliente cambiado a: {self.client_interface}")
+                    break
+                print("❌ Selección inválida.")
+            except ValueError:
+                print("❌ Ingresa un número válido.")
+
     def configure_ap_credentials(self):
-        """Permite al usuario cambiar el SSID y la clave del AP"""
         print(f"\n⚙️  Configuración actual del Hotspot:")
         print(f"   SSID: {self.ap_ssid}")
         print(f"   Contraseña: {self.ap_password}")
@@ -216,46 +237,43 @@ class NetplanWiFiManager:
         print(f"✅ Credenciales listas: SSID='{self.ap_ssid}', Pass='{self.ap_password}'")
 
     def select_ap_interface_interactive(self):
-        """Selecciona de forma dinámica qué tarjeta usar para el Hotspot"""
         all_ifaces = self.get_all_wireless_interfaces()
         
-        # Filtramos USBs (wlx) y tarjetas internas (wlp/wlan)
-        externals = [i for i in all_ifaces if i.startswith('wlx')]
-        internals = [i for i in all_ifaces if not i.startswith('wlx')]
-        
-        if len(externals) == 1:
-            print(f"✅ Adaptador USB detectado automáticamente: {externals[0]}")
-            return externals[0]
-            
-        elif len(externals) > 1:
-            print("\n📡 Múltiples adaptadores externos detectados:")
-            for idx, iface in enumerate(externals, 1):
-                print(f"  {idx}. {iface}")
-            while True:
-                try:
-                    choice = int(input("Selecciona el número del adaptador a usar para el AP: "))
-                    if 1 <= choice <= len(externals):
-                        return externals[choice-1]
-                    print("❌ Selección inválida.")
-                except ValueError:
-                    print("❌ Por favor ingresa un número.")
-                    
-        else:
-            # Caso Extremo: No hay adaptadores USB conectados
-            if internals:
-                internal = internals[0]
-                print(f"\n⚠️  ¡ATENCIÓN! No se detectaron adaptadores USB.")
-                print(f"La única opción disponible es la tarjeta interna ({internal}).")
-                print("🚨 Si continúas, SE CORTARÁ TU CONEXIÓN A INTERNET ACTUAL.")
-                confirm = input("¿Deseas generar el AP usando la tarjeta interna? (s/n): ").strip().lower()
-                if confirm == 's':
-                    return internal
-            else:
-                print("❌ No hay tarjetas inalámbricas de ningún tipo en el sistema.")
+        if not all_ifaces:
+            print("❌ No hay tarjetas inalámbricas de ningún tipo en el sistema.")
             return None
+            
+        if len(all_ifaces) == 1:
+            iface = all_ifaces[0]
+            print(f"\n⚠️  Solo se detectó una tarjeta en todo el sistema ({iface}).")
+            print("🚨 Si continúas, SE CORTARÁ TU CONEXIÓN A INTERNET ACTUAL.")
+            confirm = input("¿Deseas usar esta tarjeta para el Hotspot? (s/n): ").strip().lower()
+            return iface if confirm == 's' else None
+            
+        # Al haber 2 o más, siempre preguntamos sin asumir nada
+        print("\n📡 Selecciona el adaptador para EMITIR el Hotspot (Modo AP):")
+        for idx, iface in enumerate(all_ifaces, 1):
+            tipo = "USB/Externo" if iface.startswith('wlx') else "Interno/PCI"
+            print(f"  {idx}. {iface} ({tipo})")
+            
+        while True:
+            try:
+                choice = input("Ingresa el número [Blanco para cancelar]: ").strip()
+                if not choice: return None
+                
+                choice = int(choice)
+                if 1 <= choice <= len(all_ifaces):
+                    selected = all_ifaces[choice-1]
+                    if selected == self.client_interface:
+                        print("\n⚠️  Elegiste la MISMA tarjeta que el Cliente Principal.")
+                        confirm = input("¿Estás seguro de desconectar el internet del servidor para emitir el AP? (s/n): ").strip().lower()
+                        if confirm != 's': return None
+                    return selected
+                print("❌ Selección inválida.")
+            except ValueError:
+                print("❌ Ingresa un número válido.")
 
     def start_hotspot(self):
-        # 1. Seleccionar dinámicamente la interfaz
         self.ap_interface = self.select_ap_interface_interactive()
         if not self.ap_interface:
             print("🚫 Operación de Hotspot cancelada.")
@@ -263,7 +281,6 @@ class NetplanWiFiManager:
 
         print(f"\n🔥 Iniciando Punto de Acceso en {self.ap_interface}...")
 
-        # 2. Si se eligió la interna, desconectar de internet primero
         if self.ap_interface == self.client_interface:
             print("⚠️  Desvinculando cliente de internet para liberar hardware...")
             self.disconnect_wifi()
@@ -271,7 +288,6 @@ class NetplanWiFiManager:
         self.stop_hotspot(silent=True)
 
         try:
-            # 3. Crear archivos de configuración con las credenciales dinámicas
             hostapd_conf = "/etc/ap_hostapd.conf"
             with open(hostapd_conf, 'w') as f:
                 f.write(f"interface={self.ap_interface}\n")
@@ -290,7 +306,6 @@ class NetplanWiFiManager:
                 f.write("bind-dynamic\n")
                 f.write("dhcp-range=192.168.4.10,192.168.4.50,255.255.255.0,12h\n")
 
-            # 4. Levantar la red
             print("⚙️  Configurando enrutamiento de red local...")
             self.run_command(['ip', 'link', 'set', self.ap_interface, 'down'], sudo=True)
             self.run_command(['ip', 'addr', 'flush', 'dev', self.ap_interface], sudo=True)
@@ -298,7 +313,6 @@ class NetplanWiFiManager:
             self.run_command(['ip', 'link', 'set', self.ap_interface, 'up'], sudo=True)
             self.run_command(['rfkill', 'unblock', 'wifi'], sudo=True)
 
-            # 5. Iniciar Demonios
             print("⏳ Levantando hostapd y dnsmasq...")
             subprocess.Popen(['sudo', 'hostapd', '-B', hostapd_conf], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             time.sleep(2)
@@ -336,6 +350,8 @@ def main():
         print("\n" + "="*60)
         print(f"📡 GESTOR DE REDES Y AP (Modo Servidor)")
         print(f"   Cliente Principal: {manager.client_interface}")
+        if manager.ap_interface:
+            print(f"   Hotspot Activo en: {manager.ap_interface}")
         print("="*60)
         print("1. Escanear redes disponibles")
         print("2. Conectar a red WiFi (DHCP)")
@@ -344,6 +360,7 @@ def main():
         print("5. Apagar WiFi Cliente")
         print("-" * 60)
         print("6. ⚙️  Configurar Hotspot (Nombre y Contraseña)")
+        print("7. 🔄 Cambiar tarjeta Cliente")
         print("8. 🟢 Iniciar AP (Modo Mantenimiento)")
         print("9. 🔴 Detener AP")
         print("-" * 60)
@@ -414,6 +431,8 @@ def main():
             manager.disconnect_wifi()
         elif choice == '6':
             manager.configure_ap_credentials()
+        elif choice == '7':
+            manager.change_client_interface()
         elif choice == '8':
             manager.start_hotspot()
         elif choice == '9':
