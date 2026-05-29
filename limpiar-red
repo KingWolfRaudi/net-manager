@@ -1,0 +1,8 @@
+sudo pkill -f hostapd
+sudo pkill -f dnsmasq
+sudo iptables -t nat -F
+sudo ip addr flush dev wlp1s0
+sudo ip link set wlp1s0 down
+sudo ip link set wlp1s0 up
+sudo systemctl restart systemd-resolved
+sudo systemctl restart wpa_supplicant
